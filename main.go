@@ -108,6 +108,7 @@ type Status int
 
 const (
 	TODO = iota
+	CORRUPTED
 	DONE
 )
 
@@ -185,11 +186,9 @@ func (c *Compressor) Work(ctx context.Context, dir *os.File) error {
 			if err := json.Unmarshal(v, &f); err != nil {
 				return err
 			}
-			if f.Status == DONE {
-				c.log.Info().Msgf("Skipping already processed file: %s", f.Name)
+			if f.Status != TODO {
 				return nil
 			}
-			c.log.Info().Msgf("Initial size is %d", f.InitialSize)
 
 			err := ffmpeg.Input(f.Path).
 				Output(f.Name, ffmpeg.KwArgs{
@@ -201,16 +200,19 @@ func (c *Compressor) Work(ctx context.Context, dir *os.File) error {
 				OverWriteOutput().ErrorToStdOut().Run()
 
 			if err != nil {
-				return err
+				c.log.Error().Err(err).Msg("something is wrong with a file.")
+				f.Status = CORRUPTED
+			} else {
+				f.Status = DONE
+
+				fi, err := os.Stat(f.Name)
+				if err != nil {
+					return err
+				}
+				f.Size = fi.Size()
+				c.log.Info().Int64("initial size", f.InitialSize).Int64("current size", f.Size).Msg("DONE")
 			}
 
-			f.Status = DONE
-			fi, err := os.Stat(f.Name)
-			if err != nil {
-				return err
-			}
-			f.Size = fi.Size()
-			c.log.Info().Int64("initial size", f.InitialSize).Int64("current size", f.Size).Msg("DONE")
 			buf, err := json.Marshal(f)
 			if err != nil {
 				return err
@@ -219,30 +221,31 @@ func (c *Compressor) Work(ctx context.Context, dir *os.File) error {
 				return err
 			}
 
-			origin, err := os.OpenFile(f.Path, os.O_WRONLY|os.O_TRUNC, 0666)
-			if err != nil {
-				return err
-			}
-			defer origin.Close()
+			if f.Status == DONE {
+				origin, err := os.OpenFile(f.Path, os.O_WRONLY|os.O_TRUNC, 0666)
+				if err != nil {
+					return err
+				}
+				defer origin.Close()
 
-			replacement, err := os.Open(f.Name)
-			if err != nil {
-				return err
-			}
-			defer replacement.Close()
+				replacement, err := os.Open(f.Name)
+				if err != nil {
+					return err
+				}
+				defer replacement.Close()
 
-			_, err = io.Copy(origin, replacement)
-			if err != nil {
-				return fmt.Errorf("cannot copy content of replacement into origin: %v", err)
-			}
+				_, err = io.Copy(origin, replacement)
+				if err != nil {
+					return fmt.Errorf("cannot copy content of replacement into origin: %v", err)
+				}
 
-			// If copy is OK, then delete temporary file.
-			if err := os.Remove(f.Name); err != nil {
-				return fmt.Errorf("cannot remove temporary file: %v", err)
+				// If copy is OK, then delete temporary file.
+				if err := os.Remove(f.Name); err != nil {
+					return fmt.Errorf("cannot remove temporary file: %v", err)
+				}
 			}
 
 			return nil
-
 		})
 	})
 }
